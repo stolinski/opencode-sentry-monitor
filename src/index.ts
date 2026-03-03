@@ -20,7 +20,7 @@ const toolSpans = new Map<string, SentrySpan>();
 let sentryInitialized = false;
 let initializedDsn: string | null = null;
 
-function createLogger(input: PluginInput): PluginLogger {
+function createLogger(_input: PluginInput): PluginLogger {
   const service = "opencode-sentry-monitor";
 
   const write = (
@@ -28,24 +28,24 @@ function createLogger(input: PluginInput): PluginLogger {
     message: string,
     extra?: Record<string, unknown>,
   ): void => {
-    void input.client.app
-      .log({
-        body: {
-          service,
-          level,
-          message,
-          extra,
-        },
-      })
-      .catch(() => {
-        if (level === "error") {
-          // eslint-disable-next-line no-console
-          console.error(`[${service}] ${message}`, extra ?? "");
-          return;
-        }
-        // eslint-disable-next-line no-console
-        console.log(`[${service}] ${message}`);
-      });
+    const prefix = `[${service}] ${message}`;
+    if (level === "error") {
+      // eslint-disable-next-line no-console
+      console.error(prefix, extra ?? "");
+      return;
+    }
+    if (level === "warn") {
+      // eslint-disable-next-line no-console
+      console.warn(prefix, extra ?? "");
+      return;
+    }
+    if (level === "debug") {
+      // eslint-disable-next-line no-console
+      console.debug(prefix, extra ?? "");
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.info(prefix, extra ?? "");
   };
 
   return {

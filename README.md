@@ -61,10 +61,9 @@ The plugin looks for config in this order:
 
 1. `OPENCODE_SENTRY_CONFIG` (explicit file path)
 2. Project `.opencode/`
-3. OpenCode active config directory (from OpenCode SDK path API)
-4. `OPENCODE_CONFIG_DIR`
-5. Directory of `OPENCODE_CONFIG`
-6. Platform defaults:
+3. `OPENCODE_CONFIG_DIR`
+4. Directory of `OPENCODE_CONFIG`
+5. Platform defaults:
    - `~/.config/opencode`
    - `~/Library/Application Support/opencode`
    - `~/AppData/Roaming/opencode`

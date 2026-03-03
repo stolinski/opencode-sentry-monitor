@@ -217,26 +217,6 @@ function resolveMaybeRelative(filePath: string, cwd: string): string {
   return isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
 }
 
-async function getConfigDirectoryFromClient(input: PluginInput): Promise<string | undefined> {
-  try {
-    const response = (await input.client.path.get()) as {
-      data?: {
-        config?: string;
-      };
-      config?: string;
-    };
-
-    const configPath = response.data?.config ?? response.config;
-    if (typeof configPath === "string" && configPath.length > 0) {
-      return dirname(configPath);
-    }
-  } catch {
-    return undefined;
-  }
-
-  return undefined;
-}
-
 async function getCandidatePaths(input: PluginInput): Promise<string[]> {
   const candidates: string[] = [];
 
@@ -248,9 +228,6 @@ async function getCandidatePaths(input: PluginInput): Promise<string[]> {
   const configDirs: string[] = [];
 
   addUnique(configDirs, join(input.directory, ".opencode"));
-
-  const clientConfigDir = await getConfigDirectoryFromClient(input);
-  addUnique(configDirs, clientConfigDir);
 
   if (process.env.OPENCODE_CONFIG_DIR) {
     addUnique(configDirs, resolve(process.env.OPENCODE_CONFIG_DIR));
