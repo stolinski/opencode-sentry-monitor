@@ -4,6 +4,17 @@ Sentry AI Monitoring plugin for OpenCode.
 
 This plugin captures OpenCode session lifecycle, tool execution spans, and assistant token usage into Sentry using AI Monitoring span conventions.
 
+## Sentry Project Setup
+
+Before using this plugin, create (or reuse) a Sentry project configured for Node SDK ingestion.
+
+- **Project type**: `JavaScript` -> `Node.js`
+- **Why this type**: OpenCode plugins run in a Node runtime, and this plugin uses `@sentry/node`
+- **Required**: tracing enabled (`tracesSampleRate` > `0`) so AI Monitoring spans are stored
+- **DSN source**: Project Settings -> Client Keys (DSN)
+
+You can use an existing Node project if you already have one.
+
 ## Features
 
 - Session-level `gen_ai.invoke_agent` spans
