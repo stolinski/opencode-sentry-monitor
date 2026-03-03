@@ -1,0 +1,46 @@
+{
+  "name": "opencode-sentry-monitor",
+  "version": "0.1.0",
+  "description": "Sentry AI Monitoring plugin for OpenCode sessions and tool calls",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "sentry",
+    "observability",
+    "ai-monitoring"
+  ],
+  "author": "Scott Tolinski",
+  "homepage": "https://tolin.ski",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@sentry/node": "^10.23.0",
+    "strip-json-comments": "^5.0.1"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  }
+}
