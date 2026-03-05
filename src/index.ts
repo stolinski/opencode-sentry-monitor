@@ -16,6 +16,8 @@ interface SessionState {
 
 const sessions = new Map<string, SessionState>();
 const toolSpans = new Map<string, SentrySpan>();
+const messageTextParts = new Map<string, Map<string, string>>();
+const sessionMessages = new Map<string, Set<string>>();
 
 let sentryInitialized = false;
 let initializedDsn: string | null = null;
@@ -23,12 +25,35 @@ let initializedDsn: string | null = null;
 function createLogger(_input: PluginInput): PluginLogger {
   const service = "opencode-sentry-monitor";
 
+  const appLogger =
+    _input.client &&
+    typeof _input.client === "object" &&
+    "app" in _input.client &&
+    _input.client.app &&
+    typeof _input.client.app.log === "function"
+      ? _input.client.app.log.bind(_input.client.app)
+      : undefined;
+
   const write = (
     level: "debug" | "info" | "warn" | "error",
     message: string,
     extra?: Record<string, unknown>,
   ): void => {
     const prefix = `[${service}] ${message}`;
+
+    if (appLogger) {
+      void appLogger({
+        body: {
+          service,
+          level,
+          message,
+          extra,
+        },
+      }).catch(() => {
+        // Ignore app logger failures and continue with console logs.
+      });
+    }
+
     if (level === "error") {
       // eslint-disable-next-line no-console
       console.error(prefix, extra ?? "");
@@ -54,6 +79,181 @@ function createLogger(_input: PluginInput): PluginLogger {
     warn: (message, extra) => write("warn", message, extra),
     error: (message, extra) => write("error", message, extra),
   };
+}
+
+function logDiagnostics(
+  logger: PluginLogger,
+  config: ResolvedPluginConfig,
+  message: string,
+  extra?: Record<string, unknown>,
+): void {
+  if (!config.diagnostics) {
+    return;
+  }
+
+  logger.debug(message, extra);
+}
+
+function closeSessionToolSpans(sessionID: string): number {
+  let closed = 0;
+
+  for (const [key, span] of toolSpans) {
+    if (!key.startsWith(`${sessionID}:`)) {
+      continue;
+    }
+
+    setSpanStatus(span, true);
+    span.end();
+    toolSpans.delete(key);
+    closed += 1;
+  }
+
+  return closed;
+}
+
+function rememberSessionMessage(sessionID: string, messageID: string): void {
+  let messageIDs = sessionMessages.get(sessionID);
+  if (!messageIDs) {
+    messageIDs = new Set<string>();
+    sessionMessages.set(sessionID, messageIDs);
+  }
+
+  messageIDs.add(messageID);
+}
+
+function upsertMessageTextPart(
+  sessionID: string,
+  messageID: string,
+  partID: string,
+  text: string,
+): void {
+  rememberSessionMessage(sessionID, messageID);
+
+  let parts = messageTextParts.get(messageID);
+  if (!parts) {
+    parts = new Map<string, string>();
+    messageTextParts.set(messageID, parts);
+  }
+
+  const normalized = text.trim();
+  if (normalized.length === 0) {
+    parts.delete(partID);
+  } else {
+    parts.set(partID, normalized);
+  }
+
+  if (parts.size === 0) {
+    messageTextParts.delete(messageID);
+  }
+}
+
+function removeMessageTextPart(messageID: string, partID: string): void {
+  const parts = messageTextParts.get(messageID);
+  if (!parts) {
+    return;
+  }
+
+  parts.delete(partID);
+  if (parts.size === 0) {
+    messageTextParts.delete(messageID);
+  }
+}
+
+function removeMessageText(messageID: string, sessionID?: string): void {
+  messageTextParts.delete(messageID);
+
+  if (!sessionID) {
+    return;
+  }
+
+  const messageIDs = sessionMessages.get(sessionID);
+  if (!messageIDs) {
+    return;
+  }
+
+  messageIDs.delete(messageID);
+  if (messageIDs.size === 0) {
+    sessionMessages.delete(sessionID);
+  }
+}
+
+function getMessageText(messageID: string): string | undefined {
+  const parts = messageTextParts.get(messageID);
+  if (!parts || parts.size === 0) {
+    return undefined;
+  }
+
+  const assembled = Array.from(parts.values())
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+
+  return assembled.length > 0 ? assembled : undefined;
+}
+
+function cleanupSessionMessageState(sessionID: string): void {
+  const messageIDs = sessionMessages.get(sessionID);
+  if (!messageIDs) {
+    return;
+  }
+
+  for (const messageID of messageIDs) {
+    messageTextParts.delete(messageID);
+  }
+
+  sessionMessages.delete(sessionID);
+}
+
+async function flushSentry(
+  config: ResolvedPluginConfig,
+  logger: PluginLogger,
+  reason: string,
+  sessionID: string,
+): Promise<void> {
+  const started = Date.now();
+  try {
+    const flushed = await Sentry.flush(config.flushTimeoutMs);
+    logDiagnostics(logger, config, "Sentry flush completed", {
+      reason,
+      sessionID,
+      flushed,
+      flushTimeoutMs: config.flushTimeoutMs,
+      durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    logger.warn("Sentry flush failed", {
+      reason,
+      sessionID,
+      flushTimeoutMs: config.flushTimeoutMs,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function getEventSessionID(event: { type: string; properties: unknown }): string | undefined {
+  const properties =
+    event.properties && typeof event.properties === "object"
+      ? (event.properties as Record<string, unknown>)
+      : undefined;
+
+  if (!properties) {
+    return undefined;
+  }
+
+  if (typeof properties.sessionID === "string") {
+    return properties.sessionID;
+  }
+
+  const info =
+    properties.info && typeof properties.info === "object"
+      ? (properties.info as Record<string, unknown>)
+      : undefined;
+
+  if (info && typeof info.id === "string") {
+    return info.id;
+  }
+
+  return undefined;
 }
 
 function getProjectName(config: ResolvedPluginConfig, input: PluginInput): string {
@@ -159,11 +359,13 @@ function cleanupSession(sessionID: string): void {
 
   const state = sessions.get(sessionID);
   if (!state) {
+    cleanupSessionMessageState(sessionID);
     return;
   }
 
   state.sessionSpan?.end();
   sessions.delete(sessionID);
+  cleanupSessionMessageState(sessionID);
 }
 
 function toolOutputIndicatesError(output: { title: string; output: string; metadata: unknown }): boolean {
@@ -187,10 +389,51 @@ function toolOutputIndicatesError(output: { title: string; output: string; metad
   return /error/i.test(output.title);
 }
 
+function isMessageInfo(value: unknown): value is {
+  id: string;
+  role: "assistant" | "user";
+  sessionID: string;
+} {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const info = value as Record<string, unknown>;
+  return (
+    typeof info.id === "string" &&
+    typeof info.sessionID === "string" &&
+    (info.role === "assistant" || info.role === "user")
+  );
+}
+
+function isTextPart(value: unknown): value is {
+  id: string;
+  type: "text";
+  sessionID: string;
+  messageID: string;
+  text: string;
+  synthetic?: boolean;
+  ignored?: boolean;
+} {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const part = value as Record<string, unknown>;
+  return (
+    part.type === "text" &&
+    typeof part.id === "string" &&
+    typeof part.sessionID === "string" &&
+    typeof part.messageID === "string" &&
+    typeof part.text === "string"
+  );
+}
+
 function isAssistantMessageInfo(value: unknown): value is {
   id: string;
   role: "assistant";
   sessionID: string;
+  parentID?: string;
   modelID: string;
   providerID: string;
   tokens: {
@@ -218,6 +461,7 @@ function isAssistantMessageInfo(value: unknown): value is {
     typeof info.id === "string" &&
     info.role === "assistant" &&
     typeof info.sessionID === "string" &&
+    (typeof info.parentID === "string" || info.parentID === undefined) &&
     typeof info.modelID === "string" &&
     typeof info.providerID === "string" &&
     typeof time?.created === "number"
@@ -313,12 +557,31 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
     tracesSampleRate: config.tracesSampleRate,
     recordInputs: config.recordInputs,
     recordOutputs: config.recordOutputs,
+    diagnostics: config.diagnostics,
+    flushTimeoutMs: config.flushTimeoutMs,
   });
 
   return {
     "chat.params": async (hookInput) => {
       try {
         setSessionModel(hookInput.sessionID, hookInput.model.providerID, hookInput.model.id);
+
+        const sessionSpan = ensureSessionSpan(
+          hookInput.sessionID,
+          config,
+          projectName,
+          agentName,
+        );
+
+        sessionSpan.setAttribute("gen_ai.request.model", hookInput.model.id);
+        sessionSpan.setAttribute("opencode.model.provider", hookInput.model.providerID);
+
+        logDiagnostics(logger, config, "chat.params received", {
+          sessionID: hookInput.sessionID,
+          agent: hookInput.agent,
+          modelID: hookInput.model.id,
+          providerID: hookInput.model.providerID,
+        });
       } catch (error) {
         logger.warn("Failed to capture chat.params model metadata", {
           error: error instanceof Error ? error.message : String(error),
@@ -329,6 +592,12 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
     "tool.execute.before": async (hookInput, hookOutput) => {
       try {
+        logDiagnostics(logger, config, "tool.execute.before", {
+          sessionID: hookInput.sessionID,
+          callID: hookInput.callID,
+          tool: hookInput.tool,
+        });
+
         const parentSessionSpan = ensureSessionSpan(
           hookInput.sessionID,
           config,
@@ -373,9 +642,20 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
     "tool.execute.after": async (hookInput, hookOutput) => {
       try {
+        logDiagnostics(logger, config, "tool.execute.after", {
+          sessionID: hookInput.sessionID,
+          callID: hookInput.callID,
+          tool: hookInput.tool,
+        });
+
         const key = getToolSpanKey(hookInput.sessionID, hookInput.callID);
         const span = toolSpans.get(key);
         if (!span) {
+          logDiagnostics(logger, config, "Missing tool span for tool.execute.after", {
+            sessionID: hookInput.sessionID,
+            callID: hookInput.callID,
+            tool: hookInput.tool,
+          });
           return;
         }
 
@@ -417,6 +697,11 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
     event: async ({ event }) => {
       try {
+        logDiagnostics(logger, config, "event received", {
+          eventType: event.type,
+          sessionID: getEventSessionID(event),
+        });
+
         switch (event.type) {
           case "session.created": {
             const sessionID = event.properties.info.id;
@@ -426,32 +711,60 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
           case "session.deleted": {
             const sessionID = event.properties.info.id;
+            logDiagnostics(logger, config, "session.deleted", {
+              sessionID,
+              pendingToolSpans: closeSessionToolSpans(sessionID),
+            });
             cleanupSession(sessionID);
-            void Sentry.flush(1500);
+            await flushSentry(config, logger, "session.deleted", sessionID);
             break;
           }
 
           case "session.idle": {
+            const sessionID = event.properties.sessionID;
+
             if (config.includeSessionEvents) {
               Sentry.addBreadcrumb({
                 category: "opencode.session",
                 level: "info",
                 message: "session.idle",
                 data: {
-                  sessionID: event.properties.sessionID,
+                  sessionID,
                 },
               });
             }
-            void Sentry.flush(1000);
+
+            const state = sessions.get(sessionID);
+            const pendingToolSpans = closeSessionToolSpans(sessionID);
+
+            if (!state?.sessionSpan) {
+              logDiagnostics(logger, config, "session.idle with no active session span", {
+                sessionID,
+                pendingToolSpans,
+                completedAssistantMessages: state?.completedAssistantMessages.size ?? 0,
+              });
+            }
+
+            if (state?.sessionSpan) {
+              state.sessionSpan.end();
+              state.sessionSpan = undefined;
+            }
+
+            await flushSentry(config, logger, "session.idle", sessionID);
             break;
           }
 
           case "session.error": {
             captureSessionError(event.properties.sessionID, event.properties.error);
+            await flushSentry(config, logger, "session.error", event.properties.sessionID ?? "unknown");
             break;
           }
 
           case "message.updated": {
+            if (isMessageInfo(event.properties.info)) {
+              rememberSessionMessage(event.properties.info.sessionID, event.properties.info.id);
+            }
+
             if (!config.includeMessageUsageSpans) {
               break;
             }
@@ -495,8 +808,72 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               },
             });
 
+            if (config.recordInputs && typeof info.parentID === "string") {
+              const inputText = getMessageText(info.parentID);
+              if (inputText) {
+                usageSpan.setAttribute(
+                  "gen_ai.request.messages",
+                  serializeAttribute(
+                    [
+                      {
+                        role: "user",
+                        content: inputText,
+                      },
+                    ],
+                    config.maxAttributeLength,
+                  ),
+                );
+              } else {
+                logDiagnostics(logger, config, "No cached user text found for request input", {
+                  sessionID: info.sessionID,
+                  messageID: info.id,
+                  parentID: info.parentID,
+                });
+              }
+            }
+
+            if (config.recordOutputs) {
+              const outputText = getMessageText(info.id);
+              if (outputText) {
+                usageSpan.setAttribute(
+                  "gen_ai.response.text",
+                  serializeAttribute([outputText], config.maxAttributeLength),
+                );
+              } else {
+                logDiagnostics(logger, config, "No cached assistant text found for response output", {
+                  sessionID: info.sessionID,
+                  messageID: info.id,
+                });
+              }
+            }
+
             attachTokenUsage(usageSpan, info.tokens);
             usageSpan.end();
+            break;
+          }
+
+          case "message.part.updated": {
+            const { part } = event.properties;
+            if (!isTextPart(part)) {
+              break;
+            }
+
+            if (part.synthetic || part.ignored) {
+              removeMessageTextPart(part.messageID, part.id);
+              break;
+            }
+
+            upsertMessageTextPart(part.sessionID, part.messageID, part.id, part.text);
+            break;
+          }
+
+          case "message.part.removed": {
+            removeMessageTextPart(event.properties.messageID, event.properties.partID);
+            break;
+          }
+
+          case "message.removed": {
+            removeMessageText(event.properties.messageID, event.properties.sessionID);
             break;
           }
 

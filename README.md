@@ -20,6 +20,7 @@ You can use an existing Node project if you already have one.
 - Session-level `gen_ai.invoke_agent` spans
 - Tool-level `gen_ai.execute_tool` spans (inputs/outputs optional)
 - Assistant token usage spans via `message.updated` events
+- Model request/response attributes on `gen_ai.request` spans (`gen_ai.request.messages`, `gen_ai.response.text`)
 - Sidecar config file support (no hardcoded DSN required)
 - JSON and JSONC config support
 - Redaction and truncation for large/sensitive payload attributes
@@ -75,6 +76,9 @@ If no config file exists, environment overrides are still supported:
 - `OPENCODE_SENTRY_RECORD_INPUTS`
 - `OPENCODE_SENTRY_RECORD_OUTPUTS`
 - `OPENCODE_SENTRY_MAX_ATTRIBUTE_LENGTH`
+- `OPENCODE_SENTRY_DIAGNOSTICS`
+- `OPENCODE_SENTRY_FLUSH_TIMEOUT_MS`
+- `OPENCODE_SENTRY_DEBUG`
 - `SENTRY_ENVIRONMENT`
 - `SENTRY_RELEASE`
 
@@ -87,10 +91,12 @@ type PluginConfig = {
   environment?: string;
   release?: string;
   debug?: boolean;
+  diagnostics?: boolean; // default false
+  flushTimeoutMs?: number; // default 5000, 1000..60000
   agentName?: string;
   projectName?: string;
-  recordInputs?: boolean; // default true
-  recordOutputs?: boolean; // default true
+  recordInputs?: boolean; // default true (tool input + model request messages)
+  recordOutputs?: boolean; // default true (tool output + model response text)
   maxAttributeLength?: number; // default 12000
   includeMessageUsageSpans?: boolean; // default true
   includeSessionEvents?: boolean; // default true
@@ -115,6 +121,7 @@ npm publish
 
 - DSN is not a secret, but this plugin does not require hardcoding it.
 - If `recordInputs`/`recordOutputs` are enabled, payloads are redacted and truncated before being attached as span attributes.
+- AI spans are flushed on `session.idle` and `session.deleted`.
 
 ## License
 

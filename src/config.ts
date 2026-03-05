@@ -23,6 +23,8 @@ const DEFAULTS = {
   maxAttributeLength: 12000,
   includeMessageUsageSpans: true,
   includeSessionEvents: true,
+  diagnostics: false,
+  flushTimeoutMs: 5000,
 } as const;
 
 export interface PluginLogger {
@@ -38,6 +40,8 @@ export interface PluginConfig {
   environment?: string;
   release?: string;
   debug?: boolean;
+  diagnostics?: boolean;
+  flushTimeoutMs?: number;
   agentName?: string;
   projectName?: string;
   recordInputs?: boolean;
@@ -53,6 +57,8 @@ export interface ResolvedPluginConfig {
   environment?: string;
   release?: string;
   debug?: boolean;
+  diagnostics: boolean;
+  flushTimeoutMs: number;
   agentName?: string;
   projectName?: string;
   recordInputs: boolean;
@@ -174,12 +180,20 @@ function normalizeConfig(raw: Record<string, unknown>): ResolvedPluginConfig {
     throw new Error('"maxAttributeLength" must be an integer >= 128');
   }
 
+  const flushTimeoutMs =
+    asOptionalNumber(raw.flushTimeoutMs, "flushTimeoutMs") ?? DEFAULTS.flushTimeoutMs;
+  if (!Number.isInteger(flushTimeoutMs) || flushTimeoutMs < 1000 || flushTimeoutMs > 60000) {
+    throw new Error('"flushTimeoutMs" must be an integer between 1000 and 60000');
+  }
+
   return {
     dsn,
     tracesSampleRate,
     environment: asOptionalString(raw.environment, "environment"),
     release: asOptionalString(raw.release, "release"),
     debug: asOptionalBoolean(raw.debug, "debug"),
+    diagnostics: asOptionalBoolean(raw.diagnostics, "diagnostics") ?? DEFAULTS.diagnostics,
+    flushTimeoutMs,
     agentName: asOptionalString(raw.agentName, "agentName"),
     projectName: asOptionalString(raw.projectName, "projectName"),
     recordInputs: asOptionalBoolean(raw.recordInputs, "recordInputs") ?? DEFAULTS.recordInputs,
@@ -299,6 +313,21 @@ function addEnvOverrides(raw: Record<string, unknown>): Record<string, unknown> 
 
   if (process.env.SENTRY_RELEASE) {
     withEnv.release = process.env.SENTRY_RELEASE;
+  }
+
+  const diagnostics = parseBooleanEnv("OPENCODE_SENTRY_DIAGNOSTICS");
+  if (diagnostics !== undefined) {
+    withEnv.diagnostics = diagnostics;
+  }
+
+  const flushTimeoutMs = parseNumberEnv("OPENCODE_SENTRY_FLUSH_TIMEOUT_MS");
+  if (flushTimeoutMs !== undefined) {
+    withEnv.flushTimeoutMs = flushTimeoutMs;
+  }
+
+  const debug = parseBooleanEnv("OPENCODE_SENTRY_DEBUG");
+  if (debug !== undefined) {
+    withEnv.debug = debug;
   }
 
   return withEnv;

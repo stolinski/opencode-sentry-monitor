@@ -1,6 +1,6 @@
 {
   "name": "opencode-sentry-monitor",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "Sentry AI Monitoring plugin for OpenCode sessions and tool calls",
   "type": "module",
   "main": "./dist/index.js",
