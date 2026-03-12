@@ -23,6 +23,8 @@ const DEFAULTS = {
   maxAttributeLength: 12000,
   includeMessageUsageSpans: true,
   includeSessionEvents: true,
+  enableMetrics: false,
+  tags: {} as Record<string, string>,
 } as const;
 
 export interface PluginLogger {
@@ -45,6 +47,8 @@ export interface PluginConfig {
   maxAttributeLength?: number;
   includeMessageUsageSpans?: boolean;
   includeSessionEvents?: boolean;
+  enableMetrics?: boolean;
+  tags?: Record<string, string>;
 }
 
 export interface ResolvedPluginConfig {
@@ -60,6 +64,8 @@ export interface ResolvedPluginConfig {
   maxAttributeLength: number;
   includeMessageUsageSpans: boolean;
   includeSessionEvents: boolean;
+  enableMetrics: boolean;
+  tags: Record<string, string>;
 }
 
 export interface LoadedPluginConfig {
@@ -99,6 +105,21 @@ function asOptionalNumber(value: unknown, fieldName: string): number | undefined
     throw new Error(`"${fieldName}" must be a finite number`);
   }
   return value;
+}
+
+function asOptionalTags(value: unknown, fieldName: string): Record<string, string> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`"${fieldName}" must be an object`);
+  }
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== "string") {
+      throw new Error(`"${fieldName}.${k}" must be a string`);
+    }
+  }
+  return value as Record<string, string>;
 }
 
 function parseBooleanEnv(name: string): boolean | undefined {
@@ -192,6 +213,9 @@ function normalizeConfig(raw: Record<string, unknown>): ResolvedPluginConfig {
     includeSessionEvents:
       asOptionalBoolean(raw.includeSessionEvents, "includeSessionEvents") ??
       DEFAULTS.includeSessionEvents,
+    enableMetrics:
+      asOptionalBoolean(raw.enableMetrics, "enableMetrics") ?? DEFAULTS.enableMetrics,
+    tags: asOptionalTags(raw.tags, "tags") ?? DEFAULTS.tags,
   };
 }
 
@@ -291,6 +315,27 @@ function addEnvOverrides(raw: Record<string, unknown>): Record<string, unknown> 
   const maxAttributeLength = parseNumberEnv("OPENCODE_SENTRY_MAX_ATTRIBUTE_LENGTH");
   if (maxAttributeLength !== undefined) {
     withEnv.maxAttributeLength = maxAttributeLength;
+  }
+
+  const enableMetrics = parseBooleanEnv("OPENCODE_SENTRY_ENABLE_METRICS");
+  if (enableMetrics !== undefined) {
+    withEnv.enableMetrics = enableMetrics;
+  }
+
+  const tagsEnv = process.env.OPENCODE_SENTRY_TAGS;
+  if (tagsEnv) {
+    const envTags: Record<string, string> = {};
+    for (const pair of tagsEnv.split(",")) {
+      const colonIdx = pair.indexOf(":");
+      if (colonIdx > 0) {
+        const key = pair.slice(0, colonIdx).trim();
+        const val = pair.slice(colonIdx + 1).trim();
+        if (key.length > 0 && val.length > 0) {
+          envTags[key] = val;
+        }
+      }
+    }
+    withEnv.tags = { ...(withEnv.tags as Record<string, string> | undefined), ...envTags };
   }
 
   if (process.env.SENTRY_ENVIRONMENT) {

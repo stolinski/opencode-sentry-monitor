@@ -141,6 +141,7 @@ function ensureSessionSpan(
       "opencode.session.id": sessionID,
       "opencode.project.name": projectName,
       "opencode.capture.session_events": config.includeSessionEvents,
+      ...config.tags,
     },
   });
 
@@ -280,11 +281,16 @@ function initSentry(config: ResolvedPluginConfig, logger: PluginLogger): void {
   }
 }
 
-function captureSessionError(sessionID: string | undefined, payload: unknown): void {
+function captureSessionError(
+  sessionID: string | undefined,
+  payload: unknown,
+  customTags: Record<string, string>,
+): void {
   Sentry.captureMessage("OpenCode session.error", {
     level: "error",
     tags: {
       "opencode.session.id": sessionID ?? "unknown",
+      ...customTags,
     },
     extra: {
       payload,
@@ -351,6 +357,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             "opencode.session.id": hookInput.sessionID,
             "opencode.call.id": hookInput.callID,
             "opencode.project.name": projectName,
+            ...config.tags,
           },
         });
 
@@ -397,6 +404,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               "opencode.session.id": hookInput.sessionID,
               "opencode.call.id": hookInput.callID,
               "opencode.tool": hookInput.tool,
+              ...config.tags,
             },
             extra: {
               output: hookOutput,
@@ -406,6 +414,18 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
         span.end();
         toolSpans.delete(key);
+
+        if (config.enableMetrics) {
+          Sentry.metrics.count("gen_ai.client.tool.execution", 1, {
+            attributes: {
+              "gen_ai.agent.name": agentName,
+              "gen_ai.tool.name": hookInput.tool,
+              "opencode.project.name": projectName,
+              status: isError ? "error" : "ok",
+              ...config.tags,
+            },
+          });
+        }
       } catch (error) {
         logger.warn("Failed to finish tool span", {
           error: error instanceof Error ? error.message : String(error),
@@ -448,7 +468,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
           }
 
           case "session.error": {
-            captureSessionError(event.properties.sessionID, event.properties.error);
+            captureSessionError(event.properties.sessionID, event.properties.error, config.tags);
             break;
           }
 
@@ -494,11 +514,56 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
                 "opencode.session.id": info.sessionID,
                 "opencode.message.id": info.id,
                 "opencode.project.name": projectName,
+                ...config.tags,
               },
             });
 
             attachTokenUsage(usageSpan, info.tokens);
             usageSpan.end();
+
+            if (config.enableMetrics) {
+              const metricAttrs = {
+                "gen_ai.agent.name": agentName,
+                "opencode.project.name": projectName,
+                "gen_ai.request.model": info.modelID,
+                "opencode.model.provider": info.providerID,
+                ...config.tags,
+              };
+
+              if (info.tokens.input > 0) {
+                Sentry.metrics.distribution("gen_ai.client.token.usage", info.tokens.input, {
+                  attributes: { ...metricAttrs, "gen_ai.token.type": "input" },
+                  unit: "token",
+                });
+              }
+              if (info.tokens.output > 0) {
+                Sentry.metrics.distribution("gen_ai.client.token.usage", info.tokens.output, {
+                  attributes: { ...metricAttrs, "gen_ai.token.type": "output" },
+                  unit: "token",
+                });
+              }
+              if (info.tokens.reasoning > 0) {
+                Sentry.metrics.distribution("gen_ai.client.token.usage", info.tokens.reasoning, {
+                  attributes: { ...metricAttrs, "gen_ai.token.type": "reasoning" },
+                  unit: "token",
+                });
+              }
+              if (info.tokens.cache?.read > 0) {
+                Sentry.metrics.distribution("gen_ai.client.token.usage", info.tokens.cache.read, {
+                  attributes: { ...metricAttrs, "gen_ai.token.type": "cached_input" },
+                  unit: "token",
+                });
+              }
+
+              const durationMs = info.time.completed! - info.time.created;
+              if (durationMs > 0) {
+                Sentry.metrics.distribution("gen_ai.client.response.duration", durationMs, {
+                  attributes: metricAttrs,
+                  unit: "millisecond",
+                });
+              }
+            }
+
             break;
           }
 
