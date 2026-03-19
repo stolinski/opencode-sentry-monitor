@@ -20,12 +20,15 @@ interface SessionState {
 
 const sessions = new Map<string, SessionState>();
 const toolSpans = new Map<string, SentrySpan>();
+const sessionToolSpanKeys = new Map<string, Set<string>>();
 const messageTextParts = new Map<string, Map<string, string>>();
 const sessionMessages = new Map<string, Set<string>>();
 const sessionFlushes = new Map<string, Promise<void>>();
 const lastSessionFlushAt = new Map<string, number>();
 
+const MAX_SESSION_MESSAGES = 2048;
 const MAX_CACHED_MESSAGE_PARTS = 128;
+const MAX_COMPLETED_ASSISTANT_MESSAGES = 2048;
 const IDLE_FLUSH_COOLDOWN_MS = 1200;
 
 let sentryInitialized = false;
@@ -103,11 +106,30 @@ function logDiagnostics(
   logger.debug(message, extra);
 }
 
+function logDiagnosticsLazy(
+  logger: PluginLogger,
+  config: ResolvedPluginConfig,
+  message: string,
+  createExtra: () => Record<string, unknown>,
+): void {
+  if (!config.diagnostics) {
+    return;
+  }
+
+  logger.debug(message, createExtra());
+}
+
 function closeSessionToolSpans(sessionID: string): number {
+  const keys = sessionToolSpanKeys.get(sessionID);
+  if (!keys || keys.size === 0) {
+    return 0;
+  }
+
   let closed = 0;
 
-  for (const [key, span] of toolSpans) {
-    if (!key.startsWith(`${sessionID}:`)) {
+  for (const key of keys) {
+    const span = toolSpans.get(key);
+    if (!span) {
       continue;
     }
 
@@ -117,6 +139,8 @@ function closeSessionToolSpans(sessionID: string): number {
     closed += 1;
   }
 
+  sessionToolSpanKeys.delete(sessionID);
+
   return closed;
 }
 
@@ -125,6 +149,14 @@ function rememberSessionMessage(sessionID: string, messageID: string): void {
   if (!messageIDs) {
     messageIDs = new Set<string>();
     sessionMessages.set(sessionID, messageIDs);
+  }
+
+  if (!messageIDs.has(messageID) && messageIDs.size >= MAX_SESSION_MESSAGES) {
+    const oldestMessageID = messageIDs.values().next().value;
+    if (typeof oldestMessageID === "string") {
+      messageIDs.delete(oldestMessageID);
+      messageTextParts.delete(oldestMessageID);
+    }
   }
 
   messageIDs.add(messageID);
@@ -225,7 +257,7 @@ function getMessageText(
   let assembledLength = 0;
 
   for (const part of parts.values()) {
-    const normalized = part.trim();
+    const normalized = part;
     if (normalized.length === 0) {
       continue;
     }
@@ -293,7 +325,9 @@ async function flushSentry(
     const started = Date.now();
     try {
       const flushed = await Sentry.flush(config.flushTimeoutMs);
-      lastSessionFlushAt.set(sessionID, Date.now());
+      if (reason === "session.idle") {
+        lastSessionFlushAt.set(sessionID, Date.now());
+      }
       logDiagnostics(logger, config, "Sentry flush completed", {
         reason,
         sessionID,
@@ -414,6 +448,28 @@ function getToolSpanKey(sessionID: string, callID: string): string {
   return `${sessionID}:${callID}`;
 }
 
+function trackToolSpanKey(sessionID: string, key: string): void {
+  let keys = sessionToolSpanKeys.get(sessionID);
+  if (!keys) {
+    keys = new Set<string>();
+    sessionToolSpanKeys.set(sessionID, keys);
+  }
+
+  keys.add(key);
+}
+
+function untrackToolSpanKey(sessionID: string, key: string): void {
+  const keys = sessionToolSpanKeys.get(sessionID);
+  if (!keys) {
+    return;
+  }
+
+  keys.delete(key);
+  if (keys.size === 0) {
+    sessionToolSpanKeys.delete(sessionID);
+  }
+}
+
 function setSpanStatus(span: SentrySpan, isError: boolean): void {
   span.setStatus({ code: isError ? 2 : 1 });
 }
@@ -452,18 +508,11 @@ function ensureSessionSpan(
 }
 
 function cleanupSession(sessionID: string): void {
-  for (const [key, span] of toolSpans) {
-    if (!key.startsWith(`${sessionID}:`)) {
-      continue;
-    }
-    span.end();
-    toolSpans.delete(key);
-  }
+  closeSessionToolSpans(sessionID);
 
   const state = sessions.get(sessionID);
   if (!state) {
     cleanupSessionMessageState(sessionID);
-    sessionFlushes.delete(sessionID);
     lastSessionFlushAt.delete(sessionID);
     return;
   }
@@ -471,7 +520,6 @@ function cleanupSession(sessionID: string): void {
   state.sessionSpan?.end();
   sessions.delete(sessionID);
   cleanupSessionMessageState(sessionID);
-  sessionFlushes.delete(sessionID);
   lastSessionFlushAt.delete(sessionID);
 }
 
@@ -650,6 +698,7 @@ function initSentry(config: ResolvedPluginConfig, logger: PluginLogger): void {
 function captureSessionError(
   sessionID: string | undefined,
   payload: unknown,
+  maxAttributeLength: number,
   customTags: Record<string, string>,
 ): void {
   Sentry.captureMessage("OpenCode session.error", {
@@ -659,9 +708,28 @@ function captureSessionError(
       ...customTags,
     },
     extra: {
-      payload,
+      payload: serializeAttribute(payload, maxAttributeLength),
     },
   });
+}
+
+function rememberCompletedAssistantMessage(
+  state: SessionState,
+  messageID: string,
+): boolean {
+  if (state.completedAssistantMessages.has(messageID)) {
+    return false;
+  }
+
+  if (state.completedAssistantMessages.size >= MAX_COMPLETED_ASSISTANT_MESSAGES) {
+    const oldestMessageID = state.completedAssistantMessages.values().next().value;
+    if (typeof oldestMessageID === "string") {
+      state.completedAssistantMessages.delete(oldestMessageID);
+    }
+  }
+
+  state.completedAssistantMessages.add(messageID);
+  return true;
 }
 
 export const SentryObservabilityPlugin: Plugin = async (input) => {
@@ -675,7 +743,8 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
   const config = loaded.config;
   const projectName = getProjectName(config, input);
   const agentName = getAgentName(config, projectName);
-  const shouldCacheMessageText = config.recordInputs || config.recordOutputs;
+  const shouldCacheMessageText =
+    config.includeMessageUsageSpans && (config.recordInputs || config.recordOutputs);
 
   initSentry(config, logger);
 
@@ -727,12 +796,15 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
     },
 
     "tool.execute.before": async (hookInput, hookOutput) => {
+      let span: SentrySpan | undefined;
+      let key: string | undefined;
+
       try {
-        logDiagnostics(logger, config, "tool.execute.before", {
+        logDiagnosticsLazy(logger, config, "tool.execute.before", () => ({
           sessionID: hookInput.sessionID,
           callID: hookInput.callID,
           tool: hookInput.tool,
-        });
+        }));
 
         const parentSessionSpan = ensureSessionSpan(
           hookInput.sessionID,
@@ -742,7 +814,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
         );
 
         const state = getSessionState(hookInput.sessionID);
-        const span = Sentry.startInactiveSpan({
+        span = Sentry.startInactiveSpan({
           parentSpan: parentSessionSpan,
           op: "gen_ai.execute_tool",
           name: `execute_tool ${hookInput.tool}`,
@@ -767,11 +839,20 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
           );
         }
 
-        toolSpans.set(
-          getToolSpanKey(hookInput.sessionID, hookInput.callID),
-          span,
-        );
+        key = getToolSpanKey(hookInput.sessionID, hookInput.callID);
+        toolSpans.set(key, span);
+        trackToolSpanKey(hookInput.sessionID, key);
       } catch (error) {
+        if (key) {
+          toolSpans.delete(key);
+          untrackToolSpanKey(hookInput.sessionID, key);
+        }
+
+        if (span) {
+          setSpanStatus(span, true);
+          span.end();
+        }
+
         logger.warn("Failed to start tool span", {
           error: error instanceof Error ? error.message : String(error),
           sessionID: hookInput.sessionID,
@@ -782,37 +863,39 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
     },
 
     "tool.execute.after": async (hookInput, hookOutput) => {
+      const key = getToolSpanKey(hookInput.sessionID, hookInput.callID);
+
       try {
-        logDiagnostics(logger, config, "tool.execute.after", {
+        logDiagnosticsLazy(logger, config, "tool.execute.after", () => ({
           sessionID: hookInput.sessionID,
           callID: hookInput.callID,
           tool: hookInput.tool,
-        });
+        }));
 
-        const key = getToolSpanKey(hookInput.sessionID, hookInput.callID);
         const span = toolSpans.get(key);
         if (!span) {
-          logDiagnostics(
-            logger,
-            config,
-            "Missing tool span for tool.execute.after",
-            {
-              sessionID: hookInput.sessionID,
-              callID: hookInput.callID,
-              tool: hookInput.tool,
-            },
-          );
+          untrackToolSpanKey(hookInput.sessionID, key);
+          logDiagnosticsLazy(logger, config, "Missing tool span for tool.execute.after", () => ({
+            sessionID: hookInput.sessionID,
+            callID: hookInput.callID,
+            tool: hookInput.tool,
+          }));
           return;
         }
 
-        if (config.recordOutputs) {
+        const isError = toolOutputIndicatesError(hookOutput);
+        const shouldSerializeToolOutput = config.recordOutputs || isError;
+        const serializedToolOutput = shouldSerializeToolOutput
+          ? serializeAttribute(hookOutput, config.maxAttributeLength)
+          : undefined;
+
+        if (config.recordOutputs && serializedToolOutput !== undefined) {
           span.setAttribute(
             "gen_ai.tool.output",
-            serializeAttribute(hookOutput, config.maxAttributeLength),
+            serializedToolOutput,
           );
         }
 
-        const isError = toolOutputIndicatesError(hookOutput);
         setSpanStatus(span, isError);
 
         if (isError) {
@@ -825,13 +908,14 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               ...config.tags,
             },
             extra: {
-              output: hookOutput,
+              output: serializedToolOutput,
             },
           });
         }
 
         span.end();
         toolSpans.delete(key);
+        untrackToolSpanKey(hookInput.sessionID, key);
 
         if (config.enableMetrics) {
           Sentry.metrics.count("gen_ai.client.tool.execution", 1, {
@@ -845,6 +929,14 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
           });
         }
       } catch (error) {
+        const danglingSpan = toolSpans.get(key);
+        if (danglingSpan) {
+          setSpanStatus(danglingSpan, true);
+          danglingSpan.end();
+          toolSpans.delete(key);
+        }
+        untrackToolSpanKey(hookInput.sessionID, key);
+
         logger.warn("Failed to finish tool span", {
           error: error instanceof Error ? error.message : String(error),
           sessionID: hookInput.sessionID,
@@ -856,10 +948,10 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
     event: async ({ event }) => {
       try {
-        logDiagnostics(logger, config, "event received", {
+        logDiagnosticsLazy(logger, config, "event received", () => ({
           eventType: event.type,
           sessionID: getEventSessionID(event),
-        });
+        }));
 
         switch (event.type) {
           case "session.created": {
@@ -870,10 +962,11 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
           case "session.deleted": {
             const sessionID = event.properties.info.id;
-            logDiagnostics(logger, config, "session.deleted", {
+            const pendingToolSpans = closeSessionToolSpans(sessionID);
+            logDiagnosticsLazy(logger, config, "session.deleted", () => ({
               sessionID,
-              pendingToolSpans: closeSessionToolSpans(sessionID),
-            });
+              pendingToolSpans,
+            }));
             cleanupSession(sessionID);
             await flushSentry(config, logger, "session.deleted", sessionID, {
               force: true,
@@ -925,6 +1018,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             captureSessionError(
               event.properties.sessionID,
               event.properties.error,
+              config.maxAttributeLength,
               config.tags,
             );
             await flushSentry(
@@ -965,10 +1059,9 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             }
 
             const state = getSessionState(info.sessionID);
-            if (state.completedAssistantMessages.has(info.id)) {
+            if (!rememberCompletedAssistantMessage(state, info.id)) {
               break;
             }
-            state.completedAssistantMessages.add(info.id);
 
             setSessionModel(info.sessionID, info.providerID, info.modelID);
 

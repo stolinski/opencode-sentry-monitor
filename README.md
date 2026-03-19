@@ -20,7 +20,7 @@ You can use an existing Node project if you already have one.
 - Session-level `gen_ai.invoke_agent` spans
 - Tool-level `gen_ai.execute_tool` spans (inputs/outputs optional)
 - Assistant token usage spans via `message.updated` events
-- Model request/response attributes on `gen_ai.request` spans (`gen_ai.request.messages`, `gen_ai.response.text`)
+- Model request/response attributes on `gen_ai.request` and `gen_ai.invoke_agent` spans (`gen_ai.request.messages`, `gen_ai.response.text`)
 - Custom tags on all spans and error reports
 - Unsampled metrics for token usage, response timing, and tool executions
 - Sidecar config file support (no hardcoded DSN required)
