@@ -25,6 +25,8 @@ const DEFAULTS = {
   includeSessionEvents: true,
   diagnostics: false,
   flushTimeoutMs: 5000,
+  enableMetrics: false,
+  tags: {} as Record<string, string>,
 } as const;
 
 export interface PluginLogger {
@@ -49,6 +51,8 @@ export interface PluginConfig {
   maxAttributeLength?: number;
   includeMessageUsageSpans?: boolean;
   includeSessionEvents?: boolean;
+  enableMetrics?: boolean;
+  tags?: Record<string, string>;
 }
 
 export interface ResolvedPluginConfig {
@@ -66,6 +70,8 @@ export interface ResolvedPluginConfig {
   maxAttributeLength: number;
   includeMessageUsageSpans: boolean;
   includeSessionEvents: boolean;
+  enableMetrics: boolean;
+  tags: Record<string, string>;
 }
 
 export interface LoadedPluginConfig {
@@ -80,14 +86,20 @@ function asString(value: unknown, fieldName: string): string {
   return value.trim();
 }
 
-function asOptionalString(value: unknown, fieldName: string): string | undefined {
+function asOptionalString(
+  value: unknown,
+  fieldName: string,
+): string | undefined {
   if (value === undefined) {
     return undefined;
   }
   return asString(value, fieldName);
 }
 
-function asOptionalBoolean(value: unknown, fieldName: string): boolean | undefined {
+function asOptionalBoolean(
+  value: unknown,
+  fieldName: string,
+): boolean | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -97,7 +109,10 @@ function asOptionalBoolean(value: unknown, fieldName: string): boolean | undefin
   return value;
 }
 
-function asOptionalNumber(value: unknown, fieldName: string): number | undefined {
+function asOptionalNumber(
+  value: unknown,
+  fieldName: string,
+): number | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -105,6 +120,24 @@ function asOptionalNumber(value: unknown, fieldName: string): number | undefined
     throw new Error(`"${fieldName}" must be a finite number`);
   }
   return value;
+}
+
+function asOptionalTags(
+  value: unknown,
+  fieldName: string,
+): Record<string, string> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`"${fieldName}" must be an object`);
+  }
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== "string") {
+      throw new Error(`"${fieldName}.${k}" must be a string`);
+    }
+  }
+  return value as Record<string, string>;
 }
 
 function parseBooleanEnv(name: string): boolean | undefined {
@@ -138,7 +171,10 @@ function parseNumberEnv(name: string): number | undefined {
   return parsed;
 }
 
-function parseConfigContent(raw: string, source: string): Record<string, unknown> {
+function parseConfigContent(
+  raw: string,
+  source: string,
+): Record<string, unknown> {
   try {
     const parsed = JSON.parse(stripJsonComments(raw));
 
@@ -160,7 +196,7 @@ function normalizeConfig(raw: Record<string, unknown>): ResolvedPluginConfig {
   try {
     dsnUrl = new URL(dsn);
   } catch {
-    throw new Error("\"dsn\" must be a valid URL");
+    throw new Error('"dsn" must be a valid URL');
   }
 
   if (!/^https?:$/.test(dsnUrl.protocol)) {
@@ -168,7 +204,8 @@ function normalizeConfig(raw: Record<string, unknown>): ResolvedPluginConfig {
   }
 
   const tracesSampleRate =
-    asOptionalNumber(raw.tracesSampleRate, "tracesSampleRate") ?? DEFAULTS.tracesSampleRate;
+    asOptionalNumber(raw.tracesSampleRate, "tracesSampleRate") ??
+    DEFAULTS.tracesSampleRate;
   if (tracesSampleRate < 0 || tracesSampleRate > 1) {
     throw new Error('"tracesSampleRate" must be between 0 and 1');
   }
@@ -181,9 +218,16 @@ function normalizeConfig(raw: Record<string, unknown>): ResolvedPluginConfig {
   }
 
   const flushTimeoutMs =
-    asOptionalNumber(raw.flushTimeoutMs, "flushTimeoutMs") ?? DEFAULTS.flushTimeoutMs;
-  if (!Number.isInteger(flushTimeoutMs) || flushTimeoutMs < 1000 || flushTimeoutMs > 60000) {
-    throw new Error('"flushTimeoutMs" must be an integer between 1000 and 60000');
+    asOptionalNumber(raw.flushTimeoutMs, "flushTimeoutMs") ??
+    DEFAULTS.flushTimeoutMs;
+  if (
+    !Number.isInteger(flushTimeoutMs) ||
+    flushTimeoutMs < 1000 ||
+    flushTimeoutMs > 60000
+  ) {
+    throw new Error(
+      '"flushTimeoutMs" must be an integer between 1000 and 60000',
+    );
   }
 
   return {
@@ -192,20 +236,30 @@ function normalizeConfig(raw: Record<string, unknown>): ResolvedPluginConfig {
     environment: asOptionalString(raw.environment, "environment"),
     release: asOptionalString(raw.release, "release"),
     debug: asOptionalBoolean(raw.debug, "debug"),
-    diagnostics: asOptionalBoolean(raw.diagnostics, "diagnostics") ?? DEFAULTS.diagnostics,
+    diagnostics:
+      asOptionalBoolean(raw.diagnostics, "diagnostics") ?? DEFAULTS.diagnostics,
     flushTimeoutMs,
     agentName: asOptionalString(raw.agentName, "agentName"),
     projectName: asOptionalString(raw.projectName, "projectName"),
-    recordInputs: asOptionalBoolean(raw.recordInputs, "recordInputs") ?? DEFAULTS.recordInputs,
+    recordInputs:
+      asOptionalBoolean(raw.recordInputs, "recordInputs") ??
+      DEFAULTS.recordInputs,
     recordOutputs:
-      asOptionalBoolean(raw.recordOutputs, "recordOutputs") ?? DEFAULTS.recordOutputs,
+      asOptionalBoolean(raw.recordOutputs, "recordOutputs") ??
+      DEFAULTS.recordOutputs,
     maxAttributeLength,
     includeMessageUsageSpans:
-      asOptionalBoolean(raw.includeMessageUsageSpans, "includeMessageUsageSpans") ??
-      DEFAULTS.includeMessageUsageSpans,
+      asOptionalBoolean(
+        raw.includeMessageUsageSpans,
+        "includeMessageUsageSpans",
+      ) ?? DEFAULTS.includeMessageUsageSpans,
     includeSessionEvents:
       asOptionalBoolean(raw.includeSessionEvents, "includeSessionEvents") ??
       DEFAULTS.includeSessionEvents,
+    enableMetrics:
+      asOptionalBoolean(raw.enableMetrics, "enableMetrics") ??
+      DEFAULTS.enableMetrics,
+    tags: asOptionalTags(raw.tags, "tags") ?? DEFAULTS.tags,
   };
 }
 
@@ -254,7 +308,10 @@ async function getCandidatePaths(input: PluginInput): Promise<string[]> {
   const home = homedir();
   if (home) {
     addUnique(configDirs, join(home, ".config", "opencode"));
-    addUnique(configDirs, join(home, "Library", "Application Support", "opencode"));
+    addUnique(
+      configDirs,
+      join(home, "Library", "Application Support", "opencode"),
+    );
     addUnique(configDirs, join(home, "AppData", "Roaming", "opencode"));
   }
 
@@ -267,7 +324,9 @@ async function getCandidatePaths(input: PluginInput): Promise<string[]> {
   return candidates;
 }
 
-function addEnvOverrides(raw: Record<string, unknown>): Record<string, unknown> {
+function addEnvOverrides(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
   const withEnv = { ...raw };
 
   const dsn = process.env.OPENCODE_SENTRY_DSN ?? process.env.SENTRY_DSN;
@@ -290,7 +349,9 @@ function addEnvOverrides(raw: Record<string, unknown>): Record<string, unknown> 
     withEnv.recordOutputs = recordOutputs;
   }
 
-  const includeSessionEvents = parseBooleanEnv("OPENCODE_SENTRY_INCLUDE_SESSION_EVENTS");
+  const includeSessionEvents = parseBooleanEnv(
+    "OPENCODE_SENTRY_INCLUDE_SESSION_EVENTS",
+  );
   if (includeSessionEvents !== undefined) {
     withEnv.includeSessionEvents = includeSessionEvents;
   }
@@ -302,9 +363,35 @@ function addEnvOverrides(raw: Record<string, unknown>): Record<string, unknown> 
     withEnv.includeMessageUsageSpans = includeMessageUsageSpans;
   }
 
-  const maxAttributeLength = parseNumberEnv("OPENCODE_SENTRY_MAX_ATTRIBUTE_LENGTH");
+  const maxAttributeLength = parseNumberEnv(
+    "OPENCODE_SENTRY_MAX_ATTRIBUTE_LENGTH",
+  );
   if (maxAttributeLength !== undefined) {
     withEnv.maxAttributeLength = maxAttributeLength;
+  }
+
+  const enableMetrics = parseBooleanEnv("OPENCODE_SENTRY_ENABLE_METRICS");
+  if (enableMetrics !== undefined) {
+    withEnv.enableMetrics = enableMetrics;
+  }
+
+  const tagsEnv = process.env.OPENCODE_SENTRY_TAGS;
+  if (tagsEnv) {
+    const envTags: Record<string, string> = {};
+    for (const pair of tagsEnv.split(",")) {
+      const colonIdx = pair.indexOf(":");
+      if (colonIdx > 0) {
+        const key = pair.slice(0, colonIdx).trim();
+        const val = pair.slice(colonIdx + 1).trim();
+        if (key.length > 0 && val.length > 0) {
+          envTags[key] = val;
+        }
+      }
+    }
+    withEnv.tags = {
+      ...(withEnv.tags as Record<string, string> | undefined),
+      ...envTags,
+    };
   }
 
   if (process.env.SENTRY_ENVIRONMENT) {
@@ -356,10 +443,13 @@ export async function loadPluginConfig(
   raw = addEnvOverrides(raw);
 
   if (typeof raw.dsn !== "string" || raw.dsn.trim().length === 0) {
-    logger.info("Sentry plugin config not found. Plugin will remain disabled.", {
-      lookedIn: candidates,
-      expectedFiles: CONFIG_FILE_NAMES,
-    });
+    logger.info(
+      "Sentry plugin config not found. Plugin will remain disabled.",
+      {
+        lookedIn: candidates,
+        expectedFiles: CONFIG_FILE_NAMES,
+      },
+    );
     return null;
   }
 

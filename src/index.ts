@@ -1,7 +1,11 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import * as Sentry from "@sentry/node";
 import { basename } from "node:path";
-import { loadPluginConfig, type PluginLogger, type ResolvedPluginConfig } from "./config";
+import {
+  loadPluginConfig,
+  type PluginLogger,
+  type ResolvedPluginConfig,
+} from "./config";
 import { serializeAttribute } from "./serialize";
 
 type SentrySpan = ReturnType<typeof Sentry.startInactiveSpan>;
@@ -207,7 +211,10 @@ function removeMessageText(messageID: string, sessionID?: string): void {
   }
 }
 
-function getMessageText(messageID: string, maxLength: number): string | undefined {
+function getMessageText(
+  messageID: string,
+  maxLength: number,
+): string | undefined {
   const parts = messageTextParts.get(messageID);
   if (!parts || parts.size === 0) {
     return undefined;
@@ -263,7 +270,10 @@ async function flushSentry(
 
   if (!force && reason === "session.idle") {
     const lastFlushedAt = lastSessionFlushAt.get(sessionID);
-    if (typeof lastFlushedAt === "number" && now - lastFlushedAt < IDLE_FLUSH_COOLDOWN_MS) {
+    if (
+      typeof lastFlushedAt === "number" &&
+      now - lastFlushedAt < IDLE_FLUSH_COOLDOWN_MS
+    ) {
       logDiagnostics(logger, config, "Skipping flush during idle cooldown", {
         reason,
         sessionID,
@@ -309,7 +319,10 @@ async function flushSentry(
   }
 }
 
-function getEventSessionID(event: { type: string; properties: unknown }): string | undefined {
+function getEventSessionID(event: {
+  type: string;
+  properties: unknown;
+}): string | undefined {
   const properties =
     event.properties && typeof event.properties === "object"
       ? (event.properties as Record<string, unknown>)
@@ -335,7 +348,10 @@ function getEventSessionID(event: { type: string; properties: unknown }): string
   return undefined;
 }
 
-function getProjectName(config: ResolvedPluginConfig, input: PluginInput): string {
+function getProjectName(
+  config: ResolvedPluginConfig,
+  input: PluginInput,
+): string {
   if (config.projectName && config.projectName.length > 0) {
     return config.projectName;
   }
@@ -351,7 +367,10 @@ function getProjectName(config: ResolvedPluginConfig, input: PluginInput): strin
   return guessed.length > 0 ? guessed : "opencode-project";
 }
 
-function getAgentName(config: ResolvedPluginConfig, projectName: string): string {
+function getAgentName(
+  config: ResolvedPluginConfig,
+  projectName: string,
+): string {
   if (config.agentName && config.agentName.length > 0) {
     return config.agentName;
   }
@@ -376,7 +395,11 @@ function getSessionState(sessionID: string): SessionState {
   return created;
 }
 
-function setSessionModel(sessionID: string, providerID: string, modelID: string): void {
+function setSessionModel(
+  sessionID: string,
+  providerID: string,
+  modelID: string,
+): void {
   const state = getSessionState(sessionID);
   state.providerID = providerID;
   state.modelID = modelID;
@@ -420,6 +443,7 @@ function ensureSessionSpan(
       "opencode.session.id": sessionID,
       "opencode.project.name": projectName,
       "opencode.capture.session_events": config.includeSessionEvents,
+      ...config.tags,
     },
   });
 
@@ -451,7 +475,11 @@ function cleanupSession(sessionID: string): void {
   lastSessionFlushAt.delete(sessionID);
 }
 
-function toolOutputIndicatesError(output: { title: string; output: string; metadata: unknown }): boolean {
+function toolOutputIndicatesError(output: {
+  title: string;
+  output: string;
+  metadata: unknown;
+}): boolean {
   const metadata =
     output.metadata && typeof output.metadata === "object"
       ? (output.metadata as Record<string, unknown>)
@@ -465,7 +493,10 @@ function toolOutputIndicatesError(output: { title: string; output: string; metad
     return true;
   }
 
-  if (typeof metadata.status === "string" && metadata.status.toLowerCase() === "error") {
+  if (
+    typeof metadata.status === "string" &&
+    metadata.status.toLowerCase() === "error"
+  ) {
     return true;
   }
 
@@ -576,10 +607,16 @@ function attachTokenUsage(
     span.setAttribute("gen_ai.usage.input_tokens.cached", tokens.cache.read);
   }
   if (typeof tokens.cache?.write === "number") {
-    span.setAttribute("gen_ai.usage.input_tokens.cache_write", tokens.cache.write);
+    span.setAttribute(
+      "gen_ai.usage.input_tokens.cache_write",
+      tokens.cache.write,
+    );
   }
   if (typeof tokens.input === "number" && typeof tokens.output === "number") {
-    span.setAttribute("gen_ai.usage.total_tokens", tokens.input + tokens.output);
+    span.setAttribute(
+      "gen_ai.usage.total_tokens",
+      tokens.input + tokens.output,
+    );
   }
 }
 
@@ -600,18 +637,26 @@ function initSentry(config: ResolvedPluginConfig, logger: PluginLogger): void {
   }
 
   if (initializedDsn && initializedDsn !== config.dsn) {
-    logger.warn("Sentry is already initialized with a different DSN. Keeping the original client.", {
-      initializedDsn,
-      requestedDsn: config.dsn,
-    });
+    logger.warn(
+      "Sentry is already initialized with a different DSN. Keeping the original client.",
+      {
+        initializedDsn,
+        requestedDsn: config.dsn,
+      },
+    );
   }
 }
 
-function captureSessionError(sessionID: string | undefined, payload: unknown): void {
+function captureSessionError(
+  sessionID: string | undefined,
+  payload: unknown,
+  customTags: Record<string, string>,
+): void {
   Sentry.captureMessage("OpenCode session.error", {
     level: "error",
     tags: {
       "opencode.session.id": sessionID ?? "unknown",
+      ...customTags,
     },
     extra: {
       payload,
@@ -648,7 +693,11 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
   return {
     "chat.params": async (hookInput) => {
       try {
-        setSessionModel(hookInput.sessionID, hookInput.model.providerID, hookInput.model.id);
+        setSessionModel(
+          hookInput.sessionID,
+          hookInput.model.providerID,
+          hookInput.model.id,
+        );
 
         const sessionSpan = ensureSessionSpan(
           hookInput.sessionID,
@@ -658,7 +707,10 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
         );
 
         sessionSpan.setAttribute("gen_ai.request.model", hookInput.model.id);
-        sessionSpan.setAttribute("opencode.model.provider", hookInput.model.providerID);
+        sessionSpan.setAttribute(
+          "opencode.model.provider",
+          hookInput.model.providerID,
+        );
 
         logDiagnostics(logger, config, "chat.params received", {
           sessionID: hookInput.sessionID,
@@ -704,6 +756,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             "opencode.session.id": hookInput.sessionID,
             "opencode.call.id": hookInput.callID,
             "opencode.project.name": projectName,
+            ...config.tags,
           },
         });
 
@@ -714,7 +767,10 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
           );
         }
 
-        toolSpans.set(getToolSpanKey(hookInput.sessionID, hookInput.callID), span);
+        toolSpans.set(
+          getToolSpanKey(hookInput.sessionID, hookInput.callID),
+          span,
+        );
       } catch (error) {
         logger.warn("Failed to start tool span", {
           error: error instanceof Error ? error.message : String(error),
@@ -736,11 +792,16 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
         const key = getToolSpanKey(hookInput.sessionID, hookInput.callID);
         const span = toolSpans.get(key);
         if (!span) {
-          logDiagnostics(logger, config, "Missing tool span for tool.execute.after", {
-            sessionID: hookInput.sessionID,
-            callID: hookInput.callID,
-            tool: hookInput.tool,
-          });
+          logDiagnostics(
+            logger,
+            config,
+            "Missing tool span for tool.execute.after",
+            {
+              sessionID: hookInput.sessionID,
+              callID: hookInput.callID,
+              tool: hookInput.tool,
+            },
+          );
           return;
         }
 
@@ -761,6 +822,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               "opencode.session.id": hookInput.sessionID,
               "opencode.call.id": hookInput.callID,
               "opencode.tool": hookInput.tool,
+              ...config.tags,
             },
             extra: {
               output: hookOutput,
@@ -770,6 +832,18 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
         span.end();
         toolSpans.delete(key);
+
+        if (config.enableMetrics) {
+          Sentry.metrics.count("gen_ai.client.tool.execution", 1, {
+            attributes: {
+              "gen_ai.agent.name": agentName,
+              "gen_ai.tool.name": hookInput.tool,
+              "opencode.project.name": projectName,
+              status: isError ? "error" : "ok",
+              ...config.tags,
+            },
+          });
+        }
       } catch (error) {
         logger.warn("Failed to finish tool span", {
           error: error instanceof Error ? error.message : String(error),
@@ -825,11 +899,17 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             const pendingToolSpans = closeSessionToolSpans(sessionID);
 
             if (!state?.sessionSpan) {
-              logDiagnostics(logger, config, "session.idle with no active session span", {
-                sessionID,
-                pendingToolSpans,
-                completedAssistantMessages: state?.completedAssistantMessages.size ?? 0,
-              });
+              logDiagnostics(
+                logger,
+                config,
+                "session.idle with no active session span",
+                {
+                  sessionID,
+                  pendingToolSpans,
+                  completedAssistantMessages:
+                    state?.completedAssistantMessages.size ?? 0,
+                },
+              );
             }
 
             if (state?.sessionSpan) {
@@ -842,16 +922,33 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
           }
 
           case "session.error": {
-            captureSessionError(event.properties.sessionID, event.properties.error);
-            await flushSentry(config, logger, "session.error", event.properties.sessionID ?? "unknown", {
-              force: true,
-            });
+            captureSessionError(
+              event.properties.sessionID,
+              event.properties.error,
+              config.tags,
+            );
+            await flushSentry(
+              config,
+              logger,
+              "session.error",
+              event.properties.sessionID ?? "unknown",
+              {
+                force: true,
+              },
+            );
+
             break;
           }
 
           case "message.updated": {
-            if (shouldCacheMessageText && isMessageInfo(event.properties.info)) {
-              rememberSessionMessage(event.properties.info.sessionID, event.properties.info.id);
+            if (
+              shouldCacheMessageText &&
+              isMessageInfo(event.properties.info)
+            ) {
+              rememberSessionMessage(
+                event.properties.info.sessionID,
+                event.properties.info.id,
+              );
             }
 
             if (!config.includeMessageUsageSpans) {
@@ -895,11 +992,15 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
                 "opencode.session.id": info.sessionID,
                 "opencode.message.id": info.id,
                 "opencode.project.name": projectName,
+                ...config.tags,
               },
             });
 
             if (config.recordInputs && typeof info.parentID === "string") {
-              const inputText = getMessageText(info.parentID, config.maxAttributeLength);
+              const inputText = getMessageText(
+                info.parentID,
+                config.maxAttributeLength,
+              );
               if (inputText) {
                 usageSpan.setAttribute(
                   "gen_ai.request.messages",
@@ -914,31 +1015,120 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
                   ),
                 );
               } else {
-                logDiagnostics(logger, config, "No cached user text found for request input", {
-                  sessionID: info.sessionID,
-                  messageID: info.id,
-                  parentID: info.parentID,
-                });
+                logDiagnostics(
+                  logger,
+                  config,
+                  "No cached user text found for request input",
+                  {
+                    sessionID: info.sessionID,
+                    messageID: info.id,
+                    parentID: info.parentID,
+                  },
+                );
               }
             }
 
             if (config.recordOutputs) {
-              const outputText = getMessageText(info.id, config.maxAttributeLength);
+              const outputText = getMessageText(
+                info.id,
+                config.maxAttributeLength,
+              );
               if (outputText) {
                 usageSpan.setAttribute(
                   "gen_ai.response.text",
                   serializeAttribute([outputText], config.maxAttributeLength),
                 );
               } else {
-                logDiagnostics(logger, config, "No cached assistant text found for response output", {
-                  sessionID: info.sessionID,
-                  messageID: info.id,
-                });
+                logDiagnostics(
+                  logger,
+                  config,
+                  "No cached assistant text found for response output",
+                  {
+                    sessionID: info.sessionID,
+                    messageID: info.id,
+                  },
+                );
               }
             }
 
             attachTokenUsage(usageSpan, info.tokens);
             usageSpan.end();
+
+            if (config.enableMetrics) {
+              const metricAttrs = {
+                "gen_ai.agent.name": agentName,
+                "opencode.project.name": projectName,
+                "gen_ai.request.model": info.modelID,
+                "opencode.model.provider": info.providerID,
+                ...config.tags,
+              };
+
+              if (info.tokens.input > 0) {
+                Sentry.metrics.distribution(
+                  "gen_ai.client.token.usage",
+                  info.tokens.input,
+                  {
+                    attributes: {
+                      ...metricAttrs,
+                      "gen_ai.token.type": "input",
+                    },
+                    unit: "token",
+                  },
+                );
+              }
+              if (info.tokens.output > 0) {
+                Sentry.metrics.distribution(
+                  "gen_ai.client.token.usage",
+                  info.tokens.output,
+                  {
+                    attributes: {
+                      ...metricAttrs,
+                      "gen_ai.token.type": "output",
+                    },
+                    unit: "token",
+                  },
+                );
+              }
+              if (info.tokens.reasoning > 0) {
+                Sentry.metrics.distribution(
+                  "gen_ai.client.token.usage",
+                  info.tokens.reasoning,
+                  {
+                    attributes: {
+                      ...metricAttrs,
+                      "gen_ai.token.type": "reasoning",
+                    },
+                    unit: "token",
+                  },
+                );
+              }
+              if (info.tokens.cache?.read > 0) {
+                Sentry.metrics.distribution(
+                  "gen_ai.client.token.usage",
+                  info.tokens.cache.read,
+                  {
+                    attributes: {
+                      ...metricAttrs,
+                      "gen_ai.token.type": "cached_input",
+                    },
+                    unit: "token",
+                  },
+                );
+              }
+
+              const durationMs = info.time.completed! - info.time.created;
+              if (durationMs > 0) {
+                Sentry.metrics.distribution(
+                  "gen_ai.client.response.duration",
+                  durationMs,
+                  {
+                    attributes: metricAttrs,
+                    unit: "millisecond",
+                  },
+                );
+              }
+            }
+
             break;
           }
 
@@ -972,7 +1162,10 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               break;
             }
 
-            removeMessageTextPart(event.properties.messageID, event.properties.partID);
+            removeMessageTextPart(
+              event.properties.messageID,
+              event.properties.partID,
+            );
             break;
           }
 
@@ -981,7 +1174,10 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               break;
             }
 
-            removeMessageText(event.properties.messageID, event.properties.sessionID);
+            removeMessageText(
+              event.properties.messageID,
+              event.properties.sessionID,
+            );
             break;
           }
 

@@ -21,6 +21,8 @@ You can use an existing Node project if you already have one.
 - Tool-level `gen_ai.execute_tool` spans (inputs/outputs optional)
 - Assistant token usage spans via `message.updated` events
 - Model request/response attributes on `gen_ai.request` spans (`gen_ai.request.messages`, `gen_ai.response.text`)
+- Custom tags on all spans and error reports
+- Unsampled metrics for token usage, response timing, and tool executions
 - Sidecar config file support (no hardcoded DSN required)
 - JSON and JSONC config support
 - Redaction and truncation for large/sensitive payload attributes
@@ -79,6 +81,8 @@ If no config file exists, environment overrides are still supported:
 - `OPENCODE_SENTRY_DIAGNOSTICS`
 - `OPENCODE_SENTRY_FLUSH_TIMEOUT_MS`
 - `OPENCODE_SENTRY_DEBUG`
+- `OPENCODE_SENTRY_ENABLE_METRICS`
+- `OPENCODE_SENTRY_TAGS` (format: `key:value,key:value`)
 - `SENTRY_ENVIRONMENT`
 - `SENTRY_RELEASE`
 
@@ -100,7 +104,35 @@ type PluginConfig = {
   maxAttributeLength?: number; // default 12000
   includeMessageUsageSpans?: boolean; // default true
   includeSessionEvents?: boolean; // default true
+  enableMetrics?: boolean; // default false
+  tags?: Record<string, string>; // custom tags on all spans/metrics
 };
+```
+
+## Metrics
+
+When `enableMetrics: true`, the plugin emits Sentry metrics (unsampled, 100% accurate) for usage attribution:
+
+| Metric | Type | Unit | Emitted |
+|--------|------|------|---------|
+| `gen_ai.client.token.usage` | distribution | token | Per assistant message, tagged by token type (input/output/reasoning/cached_input) |
+| `gen_ai.client.response.duration` | distribution | millisecond | Per assistant message response time |
+| `gen_ai.client.tool.execution` | counter | — | Per tool execution, tagged with status (ok/error) |
+
+All metrics include `gen_ai.agent.name`, `opencode.project.name`, `gen_ai.request.model`, `opencode.model.provider`, plus any custom `tags`.
+
+Example config for team attribution:
+
+```json
+{
+  "dsn": "https://...",
+  "enableMetrics": true,
+  "agentName": "my-agent",
+  "tags": {
+    "team": "platform",
+    "developer": "sergiy"
+  }
+}
 ```
 
 ## Local Development
