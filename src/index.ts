@@ -18,6 +18,11 @@ const sessions = new Map<string, SessionState>();
 const toolSpans = new Map<string, SentrySpan>();
 const messageTextParts = new Map<string, Map<string, string>>();
 const sessionMessages = new Map<string, Set<string>>();
+const sessionFlushes = new Map<string, Promise<void>>();
+const lastSessionFlushAt = new Map<string, number>();
+
+const MAX_CACHED_MESSAGE_PARTS = 128;
+const IDLE_FLUSH_COOLDOWN_MS = 1200;
 
 let sentryInitialized = false;
 let initializedDsn: string | null = null;
@@ -121,11 +126,29 @@ function rememberSessionMessage(sessionID: string, messageID: string): void {
   messageIDs.add(messageID);
 }
 
+function truncateText(value: string, maxLength: number): string {
+  if (maxLength <= 0) {
+    return "";
+  }
+
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  const omitted = value.length - maxLength;
+  return `${value.slice(0, maxLength)}...[truncated ${omitted} chars]`;
+}
+
+function trimCachedMessageText(text: string, maxLength: number): string {
+  return truncateText(text.trim(), maxLength);
+}
+
 function upsertMessageTextPart(
   sessionID: string,
   messageID: string,
   partID: string,
   text: string,
+  maxLength: number,
 ): void {
   rememberSessionMessage(sessionID, messageID);
 
@@ -135,10 +158,17 @@ function upsertMessageTextPart(
     messageTextParts.set(messageID, parts);
   }
 
-  const normalized = text.trim();
+  const normalized = trimCachedMessageText(text, maxLength);
   if (normalized.length === 0) {
     parts.delete(partID);
   } else {
+    if (!parts.has(partID) && parts.size >= MAX_CACHED_MESSAGE_PARTS) {
+      const oldestPartID = parts.keys().next().value;
+      if (typeof oldestPartID === "string") {
+        parts.delete(oldestPartID);
+      }
+    }
+
     parts.set(partID, normalized);
   }
 
@@ -177,16 +207,31 @@ function removeMessageText(messageID: string, sessionID?: string): void {
   }
 }
 
-function getMessageText(messageID: string): string | undefined {
+function getMessageText(messageID: string, maxLength: number): string | undefined {
   const parts = messageTextParts.get(messageID);
   if (!parts || parts.size === 0) {
     return undefined;
   }
 
-  const assembled = Array.from(parts.values())
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
-    .join("\n\n");
+  const softLimit = Math.max(maxLength + 128, maxLength);
+  const assembledParts: string[] = [];
+  let assembledLength = 0;
+
+  for (const part of parts.values()) {
+    const normalized = part.trim();
+    if (normalized.length === 0) {
+      continue;
+    }
+
+    const separatorLength = assembledParts.length > 0 ? 2 : 0;
+    assembledParts.push(normalized);
+    assembledLength += separatorLength + normalized.length;
+    if (assembledLength >= softLimit) {
+      break;
+    }
+  }
+
+  const assembled = truncateText(assembledParts.join("\n\n"), maxLength);
 
   return assembled.length > 0 ? assembled : undefined;
 }
@@ -209,24 +254,58 @@ async function flushSentry(
   logger: PluginLogger,
   reason: string,
   sessionID: string,
+  options?: {
+    force?: boolean;
+  },
 ): Promise<void> {
-  const started = Date.now();
+  const now = Date.now();
+  const force = options?.force ?? false;
+
+  if (!force && reason === "session.idle") {
+    const lastFlushedAt = lastSessionFlushAt.get(sessionID);
+    if (typeof lastFlushedAt === "number" && now - lastFlushedAt < IDLE_FLUSH_COOLDOWN_MS) {
+      logDiagnostics(logger, config, "Skipping flush during idle cooldown", {
+        reason,
+        sessionID,
+        cooldownMs: IDLE_FLUSH_COOLDOWN_MS,
+      });
+      return;
+    }
+  }
+
+  const inFlight = sessionFlushes.get(sessionID);
+  if (inFlight) {
+    await inFlight;
+    return;
+  }
+
+  const flushPromise = (async (): Promise<void> => {
+    const started = Date.now();
+    try {
+      const flushed = await Sentry.flush(config.flushTimeoutMs);
+      lastSessionFlushAt.set(sessionID, Date.now());
+      logDiagnostics(logger, config, "Sentry flush completed", {
+        reason,
+        sessionID,
+        flushed,
+        flushTimeoutMs: config.flushTimeoutMs,
+        durationMs: Date.now() - started,
+      });
+    } catch (error) {
+      logger.warn("Sentry flush failed", {
+        reason,
+        sessionID,
+        flushTimeoutMs: config.flushTimeoutMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
+
+  sessionFlushes.set(sessionID, flushPromise);
   try {
-    const flushed = await Sentry.flush(config.flushTimeoutMs);
-    logDiagnostics(logger, config, "Sentry flush completed", {
-      reason,
-      sessionID,
-      flushed,
-      flushTimeoutMs: config.flushTimeoutMs,
-      durationMs: Date.now() - started,
-    });
-  } catch (error) {
-    logger.warn("Sentry flush failed", {
-      reason,
-      sessionID,
-      flushTimeoutMs: config.flushTimeoutMs,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    await flushPromise;
+  } finally {
+    sessionFlushes.delete(sessionID);
   }
 }
 
@@ -360,12 +439,16 @@ function cleanupSession(sessionID: string): void {
   const state = sessions.get(sessionID);
   if (!state) {
     cleanupSessionMessageState(sessionID);
+    sessionFlushes.delete(sessionID);
+    lastSessionFlushAt.delete(sessionID);
     return;
   }
 
   state.sessionSpan?.end();
   sessions.delete(sessionID);
   cleanupSessionMessageState(sessionID);
+  sessionFlushes.delete(sessionID);
+  lastSessionFlushAt.delete(sessionID);
 }
 
 function toolOutputIndicatesError(output: { title: string; output: string; metadata: unknown }): boolean {
@@ -547,6 +630,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
   const config = loaded.config;
   const projectName = getProjectName(config, input);
   const agentName = getAgentName(config, projectName);
+  const shouldCacheMessageText = config.recordInputs || config.recordOutputs;
 
   initSentry(config, logger);
 
@@ -717,7 +801,9 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               pendingToolSpans: closeSessionToolSpans(sessionID),
             });
             cleanupSession(sessionID);
-            await flushSentry(config, logger, "session.deleted", sessionID);
+            await flushSentry(config, logger, "session.deleted", sessionID, {
+              force: true,
+            });
             break;
           }
 
@@ -757,12 +843,14 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
 
           case "session.error": {
             captureSessionError(event.properties.sessionID, event.properties.error);
-            await flushSentry(config, logger, "session.error", event.properties.sessionID ?? "unknown");
+            await flushSentry(config, logger, "session.error", event.properties.sessionID ?? "unknown", {
+              force: true,
+            });
             break;
           }
 
           case "message.updated": {
-            if (isMessageInfo(event.properties.info)) {
+            if (shouldCacheMessageText && isMessageInfo(event.properties.info)) {
               rememberSessionMessage(event.properties.info.sessionID, event.properties.info.id);
             }
 
@@ -811,7 +899,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             });
 
             if (config.recordInputs && typeof info.parentID === "string") {
-              const inputText = getMessageText(info.parentID);
+              const inputText = getMessageText(info.parentID, config.maxAttributeLength);
               if (inputText) {
                 usageSpan.setAttribute(
                   "gen_ai.request.messages",
@@ -835,7 +923,7 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
             }
 
             if (config.recordOutputs) {
-              const outputText = getMessageText(info.id);
+              const outputText = getMessageText(info.id, config.maxAttributeLength);
               if (outputText) {
                 usageSpan.setAttribute(
                   "gen_ai.response.text",
@@ -855,6 +943,10 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
           }
 
           case "message.part.updated": {
+            if (!shouldCacheMessageText) {
+              break;
+            }
+
             const { part } = event.properties;
             if (!isTextPart(part)) {
               break;
@@ -865,16 +957,30 @@ export const SentryObservabilityPlugin: Plugin = async (input) => {
               break;
             }
 
-            upsertMessageTextPart(part.sessionID, part.messageID, part.id, part.text);
+            upsertMessageTextPart(
+              part.sessionID,
+              part.messageID,
+              part.id,
+              part.text,
+              config.maxAttributeLength,
+            );
             break;
           }
 
           case "message.part.removed": {
+            if (!shouldCacheMessageText) {
+              break;
+            }
+
             removeMessageTextPart(event.properties.messageID, event.properties.partID);
             break;
           }
 
           case "message.removed": {
+            if (!shouldCacheMessageText) {
+              break;
+            }
+
             removeMessageText(event.properties.messageID, event.properties.sessionID);
             break;
           }
